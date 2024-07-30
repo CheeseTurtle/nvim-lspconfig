@@ -66,12 +66,19 @@ local function make_config_info(config, bufnr)
     return vim.fn.expand '%:p:h'
   end)
 
-  if config.get_root_dir then
-    local root_dir
+
+  local root_dir, assign_root_dir
+  if config.get_config_root_dir then
+    local ser_config = {}
+    for k,v in pairs(config) do if type(v) ~= "function" then ser_config[k] = v end end
+    assign_root_dir = function() root_dir = config.get_config_root_dir(ser_config, buffer_dir, bufnr) end
+  else
+    assign_root_dir = function() root_dir = config.get_root_dir(buffer_dir, bufnr) end
+  end
+
+  if assign_root_dir then
     local co = coroutine.create(function()
-      local status, err = pcall(function()
-        root_dir = config.get_root_dir(buffer_dir)
-      end)
+      local status, err = pcall(assign_root_dir)
       if not status then
         vim.notify(('[lspconfig] unhandled error: %s'):format(tostring(err), vim.log.levels.WARN))
       end
@@ -122,19 +129,52 @@ end
 
 ---@param client vim.lsp.Client
 ---@param fname string
-local function make_client_info(client, fname)
-  local client_info = {}
+---@param bufnr integer
+---@param not_attached? boolean
+local function make_client_info(client, fname, bufnr, not_attached)
+  local client_info, seek_root = {}, true
 
   client_info.cmd = cmd_type[type(client.config.cmd)](client.config)
+  ---@diagnostic disable-next-line:undefined-field
   local workspace_folders = fn.has 'nvim-0.9' == 1 and client.workspace_folders or client.workspaceFolders
   local uv = vim.loop
   local is_windows = uv.os_uname().version:match 'Windows'
   fname = uv.fs_realpath(fname) or fn.fnamemodify(fn.resolve(fname), ':p')
-  if is_windows then
-    fname:gsub('%/', '%\\')
+  if is_windows and not vim.o.shellslash then
+    fname = fname:gsub('%/', '%\\')
   end
 
-  if workspace_folders then
+
+  local cfg = require"lspconfig.configs"[client.name]
+  ---@diagnostic disable-next-line:undefined-field
+  local get_current_root_dir = cfg and cfg.get_current_root_dir or client.config.get_current_root_dir
+  if get_current_root_dir then
+    local root_dir
+    local co = coroutine.create(function()
+      local status, err = pcall(function()
+        root_dir = get_current_root_dir(client, bufnr, fname, not_attached)
+        end)
+      if not status then
+        vim.notify(('[lspconfig] unhandled error: %s'):format(tostring(err), vim.log.levels.WARN))
+      end
+    end)
+    coroutine.resume(co)
+    if root_dir then
+      client_info.root_dir = root_dir
+    elseif coroutine.status(co) == 'suspended' then
+      client_info.root_dir = error_messages.async_root_dir_function
+    -- else
+      -- client_info.root_dir = error_messages.root_dir_not_found
+    end
+  -- else
+  --   client_info.root_dir = error_messages.root_dir_not_found
+  --   vim.list_extend(client_info.helptags, helptags[error_messages.root_dir_not_found])
+  -- end
+    seek_root = false
+  end
+
+
+  if seek_root and workspace_folders then
     for _, schema in ipairs(workspace_folders) do
       local matched = true
       local root_dir = uv.fs_realpath(schema.name)
@@ -152,9 +192,11 @@ local function make_client_info(client, fname)
   if not client_info.root_dir then
     client_info.root_dir = 'Running in single file mode.'
   end
+  ---@diagnostic disable:undefined-field
   client_info.filetypes = table.concat(client.config.filetypes or {}, ', ')
   client_info.autostart = (client.config.autostart and 'true') or 'false'
   client_info.attached_buffers_list = table.concat(vim.lsp.get_buffers_by_client_id(client.id), ', ')
+  ---@diagnostic enable:undefined-field
 
   local lines = {
     '',
@@ -174,10 +216,12 @@ local function make_client_info(client, fname)
     'cmd:             ' .. client_info.cmd,
   }
 
+  ---@diagnostic disable:undefined-field
   if client.config.lspinfo then
     local server_specific_info = client.config.lspinfo(client.config)
     info_lines = vim.list_extend(info_lines, server_specific_info)
   end
+  ---@diagnostic enable:undefined-field
 
   vim.list_extend(lines, indent_lines(info_lines, '\t'))
 
@@ -233,7 +277,7 @@ return function()
 
   vim.list_extend(buf_lines, buffer_clients_header)
   for _, client in ipairs(buf_clients) do
-    local client_info = make_client_info(client, fname)
+    local client_info = make_client_info(client, fname, bufnr)
     vim.list_extend(buf_lines, client_info)
   end
 
@@ -245,7 +289,7 @@ return function()
     vim.list_extend(buf_lines, other_active_section_header)
   end
   for _, client in ipairs(other_active_clients) do
-    local client_info = make_client_info(client, fname)
+    local client_info = make_client_info(client, fname, bufnr, true)
     vim.list_extend(buf_lines, client_info)
   end
 

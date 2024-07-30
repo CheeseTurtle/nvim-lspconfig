@@ -5,6 +5,10 @@ local tbl_deep_extend = vim.tbl_deep_extend
 
 local configs = {}
 
+--- @alias lspconfig.Config.root_dir string|fun(filename: string, bufnr: number):string?
+--- @alias lspconfig.Config.get_config_root_dir fun(config: lspconfig.Config, bufdir: string, bufnr: integer, not_attached?: boolean): string?
+--- @alias lspconfig.Config.get_current_root_dir fun(client: vim.lsp.Client, filename: string, bufnr: integer, not_attached?: boolean): string?
+
 --- @class lspconfig.Config : vim.lsp.ClientConfig
 --- @field enabled? boolean
 --- @field single_file_support? boolean
@@ -13,17 +17,46 @@ local configs = {}
 --- @field on_new_config? function
 --- @field autostart? boolean
 --- @field package _on_attach? fun(client: vim.lsp.Client, bufnr: integer)
---- @field root_dir? string|fun(filename: string, bufnr: number)
+--- @field root_dir? lspconfig.Config.root_dir
+--- @field get_config_root_dir? lspconfig.Config.get_config_root_dir
+--- @field get_current_root_dir? lspconfig.Config.get_current_root_dir
 
 --- @param cmd any
 local function sanitize_cmd(cmd)
   if cmd and type(cmd) == 'table' and not vim.tbl_isempty(cmd) then
     local original = cmd[1]
     cmd[1] = vim.fn.exepath(cmd[1])
-    if #cmd[1] == 0 then
-      cmd[1] = original
+    if #cmd[1] == 0 then cmd[1] = original end
+  end
+end
+
+---@param last lspconfig.Config|vim.lsp.ClientConfig?
+---@param curr lspconfig.Config|vim.lsp.ClientConfig?
+---@param skip_type_check? boolean
+local function deep_same(last, curr, skip_type_check)
+  if last == curr then return true end
+  if not (skip_type_check or (type(last) == "table" and type(curr) == "table")) then return false end
+  ---@cast curr table
+  ---@cast last table
+  local curr_keys = {}
+  for k, _ in pairs(curr) do
+    curr_keys[k] = true
+  end
+  for k, v in pairs(last) do
+    if not curr_keys[k] then
+      if v or k ~= false then return false end
+    elseif v then
+      if not deep_same(v, curr[k]) then return false end
+      curr_keys[k] = nil
+    elseif curr[k] then
+      return false
     end
   end
+  for k, _ in pairs(curr_keys) do
+    local v = curr[k]
+    if v or k ~= false then return false end
+  end
+  return true
 end
 
 function configs.__newindex(t, config_name, config_def)
@@ -177,6 +210,8 @@ function configs.__newindex(t, config_name, config_def)
     end
 
     -- Used by :LspInfo
+    M.get_current_root_dir = config.get_current_root_dir
+    M.get_config_root_dir = config.get_config_root_dir
     M.get_root_dir = get_root_dir
     M.filetypes = config.filetypes
     M.handlers = config.handlers
@@ -233,11 +268,15 @@ function configs.__newindex(t, config_name, config_def)
       new_config.on_attach = function(client, bufnr)
         if bufnr == api.nvim_get_current_buf() then
           M._setup_buffer(client.id, bufnr)
+          M._last_config = client.config or M._last_config
         else
           if api.nvim_buf_is_valid(bufnr) then
-            api.nvim_create_autocmd('BufEnter', {
+            api.nvim_create_autocmd("BufEnter", {
               callback = function()
-                M._setup_buffer(client.id, bufnr)
+                if M._last_config and not deep_same(M._last_config, client.config) then
+                  M._setup_buffer(client.id, bufnr)
+                end
+                M._last_config = client.config or M._last_config
               end,
               group = lsp_group,
               buffer = bufnr,
@@ -249,6 +288,8 @@ function configs.__newindex(t, config_name, config_def)
       end
 
       new_config.root_dir = root_dir
+      new_config.get_current_root_dir = config.get_current_root_dir
+      new_config.get_config_root_dir = config.get_config_root_dir
       new_config.workspace_folders = {
         {
           uri = vim.uri_from_fname(root_dir),
