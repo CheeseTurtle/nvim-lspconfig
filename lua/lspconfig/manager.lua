@@ -159,6 +159,7 @@ function M:_start_new_client(bufnr, new_config, root_dir, single_file)
     return
   end
   self:_attach_and_cache(bufnr, root_dir, client_id)
+  return client_id
 end
 
 --- @private
@@ -172,11 +173,9 @@ function M:_attach_or_spawn(bufnr, new_config, root_dir, client, single_file)
     return self:_attach_and_cache(bufnr, root_dir, client.id)
   end
 
-  local supported = vim.tbl_get(client, 'server_capabilities', 'workspace', 'workspaceFolders', 'supported')
-  if supported then
-    return self:_register_workspace_folders(bufnr, root_dir, client)
-  end
-  self:_start_new_client(bufnr, new_config, root_dir, single_file)
+  local supported = vim.tbl_get(client, "server_capabilities", "workspace", "workspaceFolders", "supported")
+  if supported then return self:_register_workspace_folders(bufnr, root_dir, client) end
+  return self:_start_new_client(bufnr, new_config, root_dir, single_file)
 end
 
 --- @private
@@ -203,27 +202,35 @@ end
 ---@param root_dir string
 ---@param single_file boolean
 ---@param bufnr integer
-function M:add(root_dir, single_file, bufnr)
+---@param force_new? boolean
+---@param config? vim.lsp.ClientConfig
+function M:add(root_dir, single_file, bufnr, force_new, config)
   root_dir = util.path.sanitize(root_dir)
-  local new_config = self.make_config(root_dir)
-  local client = get_client(self._clients, root_dir, new_config.name)
+  local client, new_config = nil, self.make_config(root_dir)
+  if not force_new then
+    client = get_client(self._clients, root_dir, new_config.name)
+  end
 
   if not client then
+    if config then
+      new_config = vim.tbl_deep_extend("force", new_config, config)
+    end
     return self:_start_new_client(bufnr, new_config, root_dir, single_file)
   end
 
   if self._clients[root_dir] or single_file then
     lsp.buf_attach_client(bufnr, client.id)
-    return
+    return client.id
   end
 
   -- make sure neovim had exchanged capabilities from language server
   -- it's useful to check server support workspaceFolders or not
   if client.initialized and client.server_capabilities then
-    self:_attach_or_spawn(bufnr, new_config, root_dir, client, single_file)
+    return self:_attach_or_spawn(bufnr, new_config, root_dir, client, single_file)
   else
     self:_attach_after_client_initialized(bufnr, new_config, root_dir, client, single_file)
   end
+  return client.id
 end
 
 --- @return vim.lsp.Client[]
@@ -258,8 +265,7 @@ function M:try_add(bufnr, project_root)
   end
 
   if project_root then
-    self:add(project_root, false, bufnr)
-    return
+    return self:add(project_root, false, bufnr)
   end
 
   local buf_path = util.path.sanitize(bufname)
@@ -279,10 +285,10 @@ function M:try_add(bufnr, project_root)
     end
 
     if root_dir then
-      self:add(root_dir, false, bufnr)
+      return self:add(root_dir, false, bufnr)
     elseif self.config.single_file_support then
       local pseudo_root = #bufname == 0 and pwd or util.path.dirname(buf_path)
-      self:add(pseudo_root, true, bufnr)
+      return self:add(pseudo_root, true, bufnr)
     end
   end)
 end
@@ -295,7 +301,7 @@ function M:try_add_wrapper(bufnr, project_root)
   local config = self.config
   -- `config.filetypes = nil` means all filetypes are valid.
   if not config.filetypes or vim.tbl_contains(config.filetypes, vim.bo[bufnr].filetype) then
-    self:try_add(bufnr, project_root)
+    return self:try_add(bufnr, project_root)
   end
 end
 
